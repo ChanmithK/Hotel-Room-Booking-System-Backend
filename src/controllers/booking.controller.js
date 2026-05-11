@@ -41,10 +41,6 @@ const getBookingById = async (req, res) => {
 
 // Create a new booking with a transaction to prevent double booking
 const createBooking = async (req, res) => {
-  // Use a session for atomic doublebooking prevention
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
   try {
     const {
       roomId,
@@ -56,42 +52,36 @@ const createBooking = async (req, res) => {
       specialRequests,
     } = req.body;
 
+    // Validation
     if (!roomId || !guestName || !guestEmail || !checkIn || !checkOut) {
-      await session.abortTransaction();
-      return res.status(400).json({
-        message:
-          "roomId, guestName, guestEmail, checkIn, checkOut are required",
-      });
+      return res.status(400).json({ message: "Missing required fields" });
     }
 
     const checkInDate = new Date(checkIn);
     const checkOutDate = new Date(checkOut);
 
     if (checkOutDate <= checkInDate) {
-      await session.abortTransaction();
       return res
         .status(400)
-        .json({ message: "checkOut must be after checkIn" });
+        .json({ message: "Check-out must be after check-in" });
     }
 
-    // Lock: check for overlapping bookings within the transaction
+    // Overlap Check
     const overlap = await Booking.findOne({
       room: roomId,
       status: { $in: ["confirmed", "checked_in"] },
       $or: [{ checkIn: { $lt: checkOutDate }, checkOut: { $gt: checkInDate } }],
-    }).session(session);
+    });
 
     if (overlap) {
-      await session.abortTransaction();
       return res
         .status(409)
-        .json({ message: "Room is already booked for the selected dates" });
+        .json({ message: "Room is already booked for these dates" });
     }
 
-    // Get room price
-    const room = await Room.findById(roomId).session(session);
+    // Room & Price Calculation
+    const room = await Room.findById(roomId);
     if (!room || !room.isActive) {
-      await session.abortTransaction();
       return res.status(404).json({ message: "Room not found or inactive" });
     }
 
@@ -100,24 +90,18 @@ const createBooking = async (req, res) => {
     );
     const totalPrice = nights * room.pricePerNight;
 
-    const [booking] = await Booking.create(
-      [
-        {
-          room: roomId,
-          guestName,
-          guestEmail,
-          guestPhone,
-          checkIn: checkInDate,
-          checkOut: checkOutDate,
-          totalPrice,
-          specialRequests,
-          createdBy: req.user._id,
-        },
-      ],
-      { session },
-    );
-
-    await session.commitTransaction();
+    // Create Booking
+    const booking = await Booking.create({
+      room: roomId,
+      guestName,
+      guestEmail,
+      guestPhone,
+      checkIn: checkInDate,
+      checkOut: checkOutDate,
+      totalPrice,
+      specialRequests,
+      createdBy: req.user._id,
+    });
 
     const populated = await Booking.findById(booking._id)
       .populate("room", "roomNumber type floor pricePerNight")
@@ -125,10 +109,7 @@ const createBooking = async (req, res) => {
 
     res.status(201).json(populated);
   } catch (error) {
-    await session.abortTransaction();
     res.status(500).json({ message: error.message });
-  } finally {
-    session.endSession();
   }
 };
 
